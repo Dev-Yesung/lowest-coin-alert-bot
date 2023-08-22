@@ -74,6 +74,116 @@ public class LowestCoinController {
         }
     }
 
+    private String findAllLowestPriceCoin() {
+        // 1) 현재가 정보 중에 코인 이름과 52주 신저가 정보를 반환한다.
+        Map<String, CoinResponse> lowestPriceInfo = getLowestCoinsPriceInfoInOneYear();
+        // 2) (3분 봉 기준)받아온 정보를 바탕으로 바닥 가격인 코인의 정보를 찾아낸다.
+        StringBuilder results = getLowestCoinsInfoAtCurrentTime(lowestPriceInfo);
+        // 3) 결과 반환
+        return getFinalResult(results);
+    }
+
+    private Map<String, CoinResponse> getLowestCoinsPriceInfoInOneYear() {
+        String queryParam = String.join(",", marketCodes.keySet());
+
+        HttpRequest tickerRequest = HttpRequest.newBuilder()
+                .uri(URI.create(MessageFormat.format("https://api.upbit.com/v1/ticker?markets={0}", queryParam)))
+                .header("accept", "application/json")
+                .method("GET", HttpRequest.BodyPublishers.noBody())
+                .build();
+
+        Map<String, CoinResponse> coinResponseMap;
+        try {
+            var response = HttpClient.newHttpClient()
+                    .send(tickerRequest, HttpResponse.BodyHandlers.ofString());
+            var objectMapper = new ObjectMapper();
+            coinResponseMap = Arrays.stream(objectMapper.readValue(response.body(), TickerResponse[].class))
+                    .map(info -> {
+                        String market = info.market();
+                        String koreanName = marketCodes.get(market).koreanName();
+                        Double openingPrice = info.openingPrice();
+                        Double lowestPrice = info.lowest52WeekPrice();
+                        String lowestPriceDate = info.lowest52WeekDate();
+
+                        return new CoinResponse(market, koreanName,
+                                openingPrice, lowestPrice,
+                                lowestPriceDate);
+                    })
+                    .collect(Collectors.toMap(CoinResponse::market, value -> value));
+        } catch (IOException | InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        return coinResponseMap;
+    }
+
+    private static StringBuilder getLowestCoinsInfoAtCurrentTime(Map<String, CoinResponse> lowestPriceInfo) {
+        StringBuilder results = new StringBuilder();
+        int apiRequestCount = 0;
+        for (String market : lowestPriceInfo.keySet()) {
+            apiRequestCount++;
+            if (apiRequestCount % 10 == 0) {
+                if (apiRequestCount % 30 == 0) {
+                    log.info("너무 많이 요청하면 안되니까 잠시 쉬셈 => 지금까지 총 요청 횟수 : {}", apiRequestCount);
+                }
+
+                try {
+                    Thread.sleep(1000L);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+
+            String requestParam = MessageFormat.format("3?market={0}", market);
+            HttpRequest currentInfoRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(MessageFormat.format("https://api.upbit.com/v1/candles/minutes/{0}", requestParam)))
+                    .header("accept", "application/json")
+                    .method("GET", HttpRequest.BodyPublishers.noBody())
+                    .build();
+
+            try {
+                var response = HttpClient.newHttpClient()
+                        .send(currentInfoRequest, HttpResponse.BodyHandlers.ofString());
+                var objectMapper = new ObjectMapper();
+                CurrentInfoResponse currentInfoResponse = objectMapper.readValue(response.body(), CurrentInfoResponse[].class)[0];
+                CoinResponse ticker = lowestPriceInfo.get(market);
+
+                String koreanName = ticker.koreanName();
+                double openingPrice = currentInfoResponse.openingPrice();
+                Double lowestPrice = ticker.lowestPrice();
+                double priceGap = openingPrice - lowestPrice;
+
+                if (priceGap <= 0) {
+                    results.append("""
+                            코인 이름 : %s
+                            현재 가격 : %.6f
+                            최저 가격 : %.6f
+                            가격 차이 : %.6f
+                                                       
+                            """.formatted(koreanName, openingPrice, lowestPrice, Math.abs(priceGap))
+                    );
+                }
+            } catch (IOException | InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        return results;
+    }
+
+    private String getFinalResult(StringBuilder results) {
+        if (!results.isEmpty()) {
+            results.append("""
+                    유저 : 여기가 코인 장례식장인가요?⚰️
+                    업비트 : 아니요~ 바겐세일입니다!🥳
+                                        
+                    """);
+
+            return results.toString();
+        }
+        return """
+                바겐세일하는 코인이 없습니다!!!🥲
+                """;
+    }
+
     @Async
     @Scheduled(fixedDelay = 2500)
     public void doPollingChatCommand() {
@@ -109,103 +219,6 @@ public class LowestCoinController {
         } catch (IOException | InterruptedException e) {
             throw new RuntimeException(e);
         }
-    }
-
-    private String findAllLowestPriceCoin() {
-        // 1) 현재가 정보 중에 코인 이름과 52주 신저가 정보를 반환한다.
-        String queryParam = String.join(",", marketCodes.keySet());
-
-        HttpRequest tickerRequest = HttpRequest.newBuilder()
-                .uri(URI.create(MessageFormat.format("https://api.upbit.com/v1/ticker?markets={0}", queryParam)))
-                .header("accept", "application/json")
-                .method("GET", HttpRequest.BodyPublishers.noBody())
-                .build();
-
-        Map<String, CoinResponse> coinResponseMap;
-        try {
-            var response = HttpClient.newHttpClient()
-                    .send(tickerRequest, HttpResponse.BodyHandlers.ofString());
-            var objectMapper = new ObjectMapper();
-            coinResponseMap = Arrays.stream(objectMapper.readValue(response.body(), TickerResponse[].class))
-                    .map(info -> {
-                        String market = info.market();
-                        String koreanName = marketCodes.get(market).koreanName();
-                        Double openingPrice = info.openingPrice();
-                        Double lowestPrice = info.lowest52WeekPrice();
-                        String lowestPriceDate = info.lowest52WeekDate();
-
-                        return new CoinResponse(market, koreanName,
-                                openingPrice, lowestPrice,
-                                lowestPriceDate);
-                    })
-                    .collect(Collectors.toMap(CoinResponse::market, value -> value));
-        } catch (IOException | InterruptedException e) {
-            throw new RuntimeException(e);
-        }
-
-        // 2) (3분 봉 기준)받아온 정보를 바탕으로 바닥 가격인 코인의 정보를 찾아낸다.
-        StringBuilder results = new StringBuilder();
-        int apiRequestCount = 0;
-        for (String market : coinResponseMap.keySet()) {
-            apiRequestCount++;
-            if (apiRequestCount % 10 == 0) {
-                if (apiRequestCount % 30 == 0) {
-                    log.info("너무 많이 요청하면 안되니까 잠시 쉬셈 => 지금까지 총 요청 횟수 : {}", apiRequestCount);
-                }
-
-                try {
-                    Thread.sleep(1000L);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
-            }
-
-            String requestParam = MessageFormat.format("3?market={0}", market);
-            HttpRequest currentInfoRequest = HttpRequest.newBuilder()
-                    .uri(URI.create(MessageFormat.format("https://api.upbit.com/v1/candles/minutes/{0}", requestParam)))
-                    .header("accept", "application/json")
-                    .method("GET", HttpRequest.BodyPublishers.noBody())
-                    .build();
-
-            try {
-                var response = HttpClient.newHttpClient()
-                        .send(currentInfoRequest, HttpResponse.BodyHandlers.ofString());
-                var objectMapper = new ObjectMapper();
-                CurrentInfoResponse currentInfoResponse = objectMapper.readValue(response.body(), CurrentInfoResponse[].class)[0];
-                CoinResponse ticker = coinResponseMap.get(market);
-
-                String koreanName = ticker.koreanName();
-                double openingPrice = currentInfoResponse.openingPrice();
-                Double lowestPrice = ticker.lowestPrice();
-                double priceGap = openingPrice - lowestPrice;
-
-                if (priceGap <= 0) {
-                    results.append("""
-                            코인 이름 : %s
-                            현재 가격 : %.6f
-                            최저 가격 : %.6f
-                            가격 차이 : %.6f
-                                                       
-                            """.formatted(koreanName, openingPrice, lowestPrice, Math.abs(priceGap))
-                    );
-                }
-            } catch (IOException | InterruptedException e) {
-                throw new RuntimeException(e);
-            }
-        }
-
-        if (!results.isEmpty()) {
-            results.append("""
-                    유저 : 여기가 코인 장례식장인가요?⚰️
-                    업비트 : 아니요~ 바겐세일입니다!🥳
-                                        
-                    """);
-
-            return results.toString();
-        }
-        return """
-                바겐세일하는 코인이 없습니다!!!🥲
-                """;
     }
 
 }
