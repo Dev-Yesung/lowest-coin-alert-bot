@@ -4,8 +4,10 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import lowestcoin.application.LowestCoinService;
 import lowestcoin.application.dto.CoinResponse;
 import lowestcoin.application.dto.CurrentInfoResponse;
+import lowestcoin.application.dto.LowestCoinResponse;
 import lowestcoin.application.dto.MarketCodeResponse;
 import lowestcoin.application.dto.TelegramBotMessageRequest;
 import lowestcoin.application.dto.TickerResponse;
@@ -22,7 +24,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.text.MessageFormat;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -30,13 +34,18 @@ import java.util.stream.Collectors;
 @Component
 @EnableAsync
 public class LowestCoinController {
+    private final LowestCoinService lowestCoinService;
 
     private final Map<String, MarketCodeResponse> marketCodes;
     private static final int lastReceivedId = 0;
 
-    public LowestCoinController(MarketCodeRepository marketCodeRepository) {
+    public LowestCoinController(
+            MarketCodeRepository marketCodeRepository,
+            LowestCoinService lowestCoinService
+    ) {
         marketCodeRepository.saveCurrentKRWMarketCodeLists();
         this.marketCodes = marketCodeRepository.getMarketCodes();
+        this.lowestCoinService = lowestCoinService;
     }
 
     @Async
@@ -75,9 +84,9 @@ public class LowestCoinController {
     }
 
     private String findAllLowestPriceCoin() {
-        Map<String, CoinResponse> lowestPriceInfo = getLowestCoinsPriceInfoInOneYear();
-        StringBuilder resultBuilder = getLowestCoinsInfoAtCurrentTime(lowestPriceInfo);
-        return getFinalResult(resultBuilder);
+        var lowestPriceInfo = getLowestCoinsPriceInfoInOneYear();
+        var lowestCoinsInfoAtCurrentTime = getLowestCoinsInfoAtCurrentTime(lowestPriceInfo);
+        return getFinalResult(lowestCoinsInfoAtCurrentTime);
     }
 
     private Map<String, CoinResponse> getLowestCoinsPriceInfoInOneYear() {
@@ -96,17 +105,15 @@ public class LowestCoinController {
         }
     }
 
-    private static StringBuilder getLowestCoinsInfoAtCurrentTime(Map<String, CoinResponse> lowestPriceInfo) {
-        StringBuilder results = new StringBuilder();
+    private List<LowestCoinResponse> getLowestCoinsInfoAtCurrentTime(Map<String, CoinResponse> lowestPriceInfo) {
         int apiRequestCount = 0;
+
+        List<LowestCoinResponse> responses = new ArrayList<>();
         for (String market : lowestPriceInfo.keySet()) {
             apiRequestCount++;
             if (apiRequestCount % 10 == 0) {
-                if (apiRequestCount % 30 == 0) {
-                    log.info("너무 많이 요청하면 안되니까 잠시 쉬셈 => 지금까지 총 요청 횟수 : {}", apiRequestCount);
-                }
-
                 try {
+                    log.info("너무 많이 요청하면 안되니까 잠시 쉬셈 => 지금까지 총 요청 횟수 : {}", apiRequestCount);
                     Thread.sleep(1000L);
                 } catch (InterruptedException e) {
                     throw new RuntimeException(e);
@@ -123,41 +130,51 @@ public class LowestCoinController {
             try {
                 var response = HttpClient.newHttpClient()
                         .send(currentInfoRequest, HttpResponse.BodyHandlers.ofString());
-                var objectMapper = new ObjectMapper();
-                CurrentInfoResponse currentInfoResponse = objectMapper.readValue(response.body(), CurrentInfoResponse[].class)[0];
+                CurrentInfoResponse currentInfoResponse = new ObjectMapper()
+                        .readValue(response.body(), CurrentInfoResponse[].class)[0];
                 CoinResponse ticker = lowestPriceInfo.get(market);
 
-                String koreanName = ticker.koreanName();
-                double openingPrice = currentInfoResponse.openingPrice();
-                Double lowestPrice = ticker.lowestPrice();
-                double priceGap = openingPrice - lowestPrice;
-
-                if (priceGap <= 0) {
-                    results.append("""
-                            코인 이름 : %s
-                            현재 가격 : %.6f
-                            최저 가격 : %.6f
-                            가격 차이 : %.6f
-                                                       
-                            """.formatted(koreanName, openingPrice, lowestPrice, Math.abs(priceGap))
-                    );
-                }
+                LowestCoinResponse lowestCoinResponse = lowestCoinService.makeLowestCoinInfo(currentInfoResponse, ticker);
+                responses.add(lowestCoinResponse);
             } catch (IOException | InterruptedException e) {
                 throw new RuntimeException(e);
             }
         }
-        return results;
+
+        return responses;
     }
 
-    private String getFinalResult(StringBuilder results) {
-        if (!results.isEmpty()) {
-            results.append("""
+    private String getFinalResult(List<LowestCoinResponse> lowestCoinResponses) {
+        StringBuilder result = new StringBuilder();
+        for (var response : lowestCoinResponses) {
+            if (response.market() == null) {
+                continue;
+            }
+
+            result.append("""
+                    마켓명 : %s
+                    코인 이름 : %s
+                    현재 가격 : %.6f
+                    최저 가격 : %.6f
+                    가격 차이 : %.6f
+
+                    """
+                    .formatted(response.market(),
+                            response.koreanName(),
+                            response.openingPrice(),
+                            response.lowestPrice(),
+                            Math.abs(response.priceGap()))
+            );
+        }
+
+        if (!result.isEmpty()) {
+            result.append("""
                     유저 : 여기가 코인 장례식장인가요?⚰️
                     업비트 : 아니요~ 바겐세일입니다!🥳
                                         
                     """);
 
-            return results.toString();
+            return result.toString();
         }
         return """
                 바겐세일하는 코인이 없습니다!!!🥲
